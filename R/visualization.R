@@ -50,6 +50,7 @@ NULL
 #' @importFrom scattermore geom_scattermore
 #' @importFrom stats dist hclust
 #' @importFrom RColorBrewer brewer.pal.info
+#' @importFrom glmGamPoi glm_gp
 #'
 #' @export
 #' @concept visualization
@@ -64,23 +65,24 @@ NULL
 #' pbmc_small[['groups']] <- sample(x = c('g1', 'g2'), size = ncol(x = pbmc_small), replace = TRUE)
 #' DotPlot(object = pbmc_small, features = cd_genes, split.by = 'groups')
 #'
-DotPlot <- function(
-  object,
-  assay = NULL,
-  features,
-  cols = c("lightgrey", "blue"),
-  col.min = -2.5,
-  col.max = 2.5,
-  dot.min = 0,
-  dot.scale = 6,
-  idents = NULL,
-  group.by = NULL,
-  split.by = NULL,
-  cluster.idents = FALSE,
-  scale = TRUE,
-  scale.by = 'radius',
-  scale.min = NA,
-  scale.max = NA
+RobustDotPlot <- function(
+    object,
+    sizeFactors,
+    features,
+    cols = c("lightgrey", "blue"),
+    col.min = -2.5,
+    col.max = 2.5,
+    dot.min = 0,
+    dot.scale = 6,
+    idents = NULL,
+    group.by = NULL,
+    split.by = NULL,
+    cluster.idents = FALSE,
+    scale = TRUE,
+    scale.by = 'radius',
+    scale.min = NA,
+    scale.max = NA,
+    assay = NULL
 ) {
   assay <- assay %||% DefaultAssay(object = object)
   DefaultAssay(object = object) <- assay
@@ -110,7 +112,7 @@ DotPlot <- function(
     names(x = feature.groups) <- features
   }
   cells <- unlist(x = CellsByIdentities(object = object, idents = idents))
-
+  
   data.features <- FetchData(object = object, vars = features, cells = cells)
   data.features$id <- if (is.null(x = group.by)) {
     Idents(object = object)[cells, drop = TRUE]
@@ -135,22 +137,35 @@ DotPlot <- function(
     unique.splits <- unique(x = splits)
     id.levels <- paste0(rep(x = id.levels, each = length(x = unique.splits)), "_", rep(x = unique(x = splits), times = length(x = id.levels)))
   }
-  data.plot <- lapply(
-    X = unique(x = data.features$id),
-    FUN = function(ident) {
-      data.use <- data.features[data.features$id == ident, 1:(ncol(x = data.features) - 1), drop = FALSE]
-      avg.exp <- apply(
-        X = data.use,
-        MARGIN = 2,
-        FUN = function(x) {
-          return(mean(x = expm1(x = x)))
-        }
-      )
-      pct.exp <- apply(X = data.use, MARGIN = 2, FUN = PercentAbove, threshold = 0)
-      return(list(avg.exp = avg.exp, pct.exp = pct.exp))
-    }
-  )
-  names(x = data.plot) <- unique(x = data.features$id)
+  glm.results = sapply(
+    id.levels,
+    function(ident) {
+      gene.names = colnames(data.features)[-ncol(data.features)]
+      g = glm_gp(
+        t(as.matrix(subset(data.features, select = -id, id == ident))),
+        col_data = data.frame(row.names = rownames(data.features)[data.features$id == ident]),
+        size_factors = sizeFactors[rownames(data.features)[data.features$id == ident]])
+      data.frame(beta = g$Beta[, 1], overdispersions = g$overdispersions, row.names = gene.names)
+    },
+    simplify = F,
+    USE.NAMES = T)
+  data.plot = sapply(
+    glm.results,
+    function(g) {
+      pct.exp = pnbinom(0, mu = exp(g$beta), size = g$overdispersions, lower.tail = F)
+      #avg.exp = sapply(
+      #  features,
+      #  function(feature) {
+      #    data = unlist(subset(data.features, select = feature))
+      #  }
+      #  USE.NAMES = T)
+      data.frame(
+        avg.exp = (g$beta - log(pct.exp)) / log(2),
+        pct.exp = pct.exp,
+        row.names = rownames(g))
+    },
+    simplify = F)
+  data.plot = data.plot[unique(x = data.features$id)]
   if (cluster.idents) {
     mat <- do.call(
       what = rbind,
